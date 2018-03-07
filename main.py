@@ -1,6 +1,7 @@
 import boto3
 import datetime
 import argparse
+import time
 from botocore.exceptions import ClientError
 
 from config import *
@@ -20,13 +21,26 @@ backup_region_client = boto3.client(
 )
 
 
-def get_manual_snapshots_for_db_instance(instance_id):
+def get_manual_snapshots_for_db_instance(client_obj, instance_id):
     """ Return list of manual snapshots for instance """
-    db_snapshots = client.describe_db_snapshots(
+    db_snapshots = client_obj.describe_db_snapshots(
         DBInstanceIdentifier=instance_id,
         SnapshotType='manual'
     )
     return db_snapshots['DBSnapshots']
+
+
+def get_snapshot_pairs(instance_id):
+    backups = {}
+    manual_snapshots = get_manual_snapshots_for_db_instance(client, instance_id)
+    # print('Manual snapshots in default region: %s' % manual_snapshots)
+    backup_manual_snapshots = get_manual_snapshots_for_db_instance(backup_region_client, instance_id)
+    # print('Manual snapshots in backup region: %s' % backup_manual_snapshots)
+    for snap in manual_snapshots:
+        for bsnap in backup_manual_snapshots:
+            if snap['DBSnapshotArn'] == bsnap['SourceDBSnapshotIdentifier']:
+                backups[snap['DBSnapshotIdentifier']] = bsnap['DBSnapshotIdentifier']
+    return backups
 
 
 def create_snapshot_for_db_instance(instance_id):
@@ -45,7 +59,16 @@ def create_snapshot_for_db_instance(instance_id):
         )
     except ClientError as cl_err:
         print("create_snapshot failed: %s" % cl_err.response['Error']['Message'])
-    return response
+
+    status_str = 'Snapshot creating.'
+    print("status_str %s" % response)
+    while response['Status'] != 'available':
+        status_str += '.'
+        print(status_str)
+        time.sleep(10)
+
+    res = copy_snapshot_to_backup_region(backup_region_client, 'scheduled-dev-db-1-2018-03-07-11-34')
+    print(res)
 
 
 def delete_snapshot_for_db_instance(instance_id):
@@ -67,12 +90,6 @@ def copy_snapshot_to_backup_region(client_obj, snapshot_id):
     response = client_obj.copy_db_snapshot(
         SourceDBSnapshotIdentifier=src_db_snaps_arn,
         TargetDBSnapshotIdentifier='%s-copy' % snapshot_id,
-        Tags=[
-            {
-                'Key': 'src-snap',
-                'Value': snapshot_id
-            },
-        ],
         SourceRegion=AWS_DEFAULT_REGION
     )
     return response
@@ -81,27 +98,31 @@ def copy_snapshot_to_backup_region(client_obj, snapshot_id):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-i", "--instance", help="RDS Instance ID")
+    parser.add_argument("-s", "--snapshot", help="Snapshot ID")
     parser.add_argument("-ss", "--show_snapshots", action="store_true", help="Show snapshots for instance")
+    parser.add_argument("-sbs", "--show_backup_snapshots", action="store_true",
+                       help="Show snapshots for instance from backup region")
     parser.add_argument("-c", "--create_snapshot", action="store_true", help="Create snapshot for instance")
     parser.add_argument("-d", "--delete_snapshot", action="store_true", help="Delete snapshot for instance")
     args = parser.parse_args()
 
     if args.show_snapshots:
-        manual_snapshots = get_manual_snapshots_for_db_instance("dev-db-1")
-        print(manual_snapshots)
+        if not args.instance:
+            raise ValueError('Specify instance ID with -i argument')
+        backups = get_snapshot_pairs(args.instance)
+        print(backups)
 
-    # for snap in DB_Snapshots["DBSnapshots"]:
-    #     print(snap)
+    if args.create_snapshot:
+        if not args.instance:
+            raise ValueError('Specify instance ID with -i argument')
+        create_snapshot_for_db_instance('dev-db-1')
 
-    # create
-    # res = create_snapshot_for_db_instance('dev-db-1')
-    # print(res)
-    ####
+    if args.delete_snapshot:
+        if not args.snapshot:
+            raise ValueError('Specify instance ID with -i argument')
+        res = delete_snapshot_for_db_instance(args.snapshot)
+        print(res)
 
-    # delete
-    # res = delete_snapshot_for_db_instance('scheduled-dev-db-1-2018-03-06-18-35')
-    # print(res)
-
-    # copy
-    res = copy_snapshot_to_backup_region(backup_region_client, 'scheduled-dev-db-1-2018-03-07-11-34')
-    print(res)
+    # TODO enable it the end of work
+    # else:
+    #     parser.print_help()
